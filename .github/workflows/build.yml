@@ -76,6 +76,8 @@ jobs:
 
         sed -i 's#//go:build !android#//go:build linux#' wgengine/router/osrouter/router_linux.go
 
+        sed -i '/^\/\/go:build !android$/d' feature/taildrop/fileops_fs.go
+
         printf '%s\n' '//go:build android' '' 'package netmon' '' '// RuleDeleted reports that one of Tailscale policy routing rules was deleted.' 'type RuleDeleted struct {' '        Table uint8' '        Priority uint32' '}' > net/netmon/ruledeleted_android.go
 
 
