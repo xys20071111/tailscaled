@@ -1,0 +1,122 @@
+--- a/cmd/tailscaled/tailscaled.go
++++ b/cmd/tailscaled/tailscaled.go
+@@ -84,6 +84,8 @@
+ 		return "auto"
+ 	case "aix", "solaris", "illumos":
+ 		return "userspace-networking"
++	case "android":
++		return "tailscale0,userspace-networking"
+ 	case "linux":
+ 		if buildfeatures.HasSynology && buildfeatures.HasNetstack && distro.Get() == distro.Synology {
+ 			// Try TUN, but fall back to userspace networking if needed.
+--- a/feature/taildrop/fileops_fs.go
++++ b/feature/taildrop/fileops_fs.go
+@@ -1,6 +1,5 @@
+ // Copyright (c) Tailscale Inc & contributors
+ // SPDX-License-Identifier: BSD-3-Clause
+-//go:build !android
+ 
+ package taildrop
+ 
+--- a/wgengine/router/osrouter/router_linux.go
++++ b/wgengine/router/osrouter/router_linux.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & contributors
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build !android
++//go:build linux
+ 
+ package osrouter
+ 
+@@ -588,7 +588,7 @@
+ 
+ 	// Issue 11405: enable IP forwarding on gokrazy.
+ 	advertisingRoutes := len(cfg.SubnetRoutes) > 0
+-	if getDistroFunc() == distro.Gokrazy && advertisingRoutes {
++	if (getDistroFunc() == distro.Gokrazy || runtime.GOOS == "android") && advertisingRoutes {
+ 		r.enableIPForwarding()
+ 	}
+ 
+@@ -1651,6 +1651,8 @@
+ func ipRules() []netlink.Rule {
+ 	if getDistroFunc() == distro.UBNT {
+ 		return ubntIPRules
++	} else if runtime.GOOS == "android" {
++		return getAndroidIPRules()
+ 	}
+ 	return baseIPRules
+ }
+@@ -2021,3 +2023,55 @@
+ 		IPNet: netipx.PrefixIPNet(p),
+ 	}
+ }
++
++// detectAndroidDefaultTable returns the routing table number for the current
++// default route on Android. Returns 0 if detection fails.
++func detectAndroidDefaultTable() int {
++	routes, err := netlink.RouteGet(net.IPv4(8, 8, 8, 8))
++	if err != nil || len(routes) == 0 {
++		return 0
++	}
++	if routes[0].Table > 0 {
++		return routes[0].Table
++	}
++	return 0
++}
++
++// getAndroidIPRules returns Android-specific IP rules, including a dynamic
++// exit node rule that uses the current default network's routing table.
++func getAndroidIPRules() []netlink.Rule {
++	rules := []netlink.Rule{
++		{
++			Priority: 7300,
++			Dst:      netipx.PrefixIPNet(netip.MustParsePrefix("100.64.0.0/10")),
++			Table:    tailscaleRouteTable.Num,
++		},
++		{
++			Priority: 7300,
++			Dst:      netipx.PrefixIPNet(netip.MustParsePrefix("fd7a:115c:a1e0::/48")),
++			Table:    tailscaleRouteTable.Num,
++		},
++		{
++			Priority: 7801,
++			Mark:     tsconst.LinuxSubnetRouteMarkNum,
++			Mask:     tsconst.LinuxFwmarkMaskNum,
++			Table:    mainRouteTable.Num,
++		},
++		{
++			Priority: 7801,
++			Invert:   true,
++			Mark:     tsconst.LinuxBypassMarkNum,
++			Mask:     tsconst.LinuxFwmarkMaskNum,
++			Table:    tailscaleRouteTable.Num,
++		},
++	}
++	if table := detectAndroidDefaultTable(); table > 0 {
++		rules = append(rules, netlink.Rule{
++			Priority: 7801,
++			Mark:     tsconst.LinuxSubnetRouteMarkNum,
++			Mask:     tsconst.LinuxFwmarkMaskNum,
++			Table:    table,
++		})
++	}
++	return rules
++}
+diff --git a/net/netmon/ruledeleted_android.go b/net/netmon/ruledeleted_android.go
+new file mode 100644
+--- /dev/null
++++ b/net/netmon/ruledeleted_android.go
+@@ -0,0 +1,12 @@
++//go:build android
++
++package netmon
++
++// RuleDeleted reports that one of Tailscale's policy routing rules
++// was deleted.
++type RuleDeleted struct {
++	// Table is the table number that the deleted rule referenced.
++	Table uint8
++	// Priority is the lookup priority of the deleted rule.
++	Priority uint32
++}

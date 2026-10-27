@@ -45,4 +45,4 @@ This module is confirmed to be supported for KernelSU
 
 ## Credits
 
-- [ANASFANANI & AUTHORS](https://github.com/anasfanani/Magisk-Tailscaled). for the repo structure.
+- [ANASFANANI & AUTHORS](https://github.com/anasfanani/Magisk-Tailscaled). for the repo structure and android specific code.
