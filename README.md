@@ -10,7 +10,7 @@ This repository contains a Magisk and KernelSU module for running Tailscale on r
 1. Download the latest zip file from the [Releases](https://github.com/mgksu/tailscaled/releases/latest) page.
 2. Install the downloaded zip file using Magisk & reboot your phone.
 3. Open the Terminal.
-4. Run `tailscale up --ssh --accept-dns=false` to initiate login.You can skip ssh if you don't need it.
+4. Run `tailscale up --accept-dns=false` to initiate login.
 5. Run 'tailscale ip' to retrieve your Tailscale IP.
 
 After installation, the Tailscale daemon (`tailscaled`) will run automatically on boot.
@@ -18,15 +18,6 @@ After installation, the Tailscale daemon (`tailscaled`) will run automatically o
 ## Limitation
 
 - This module only support `arm64` architecture.
-
-## Tailscale SSH 
-- For ssh home directory is created at `/data/ssh/root` with Bourne shell (sh) as default shell.
-- If you want to change to zsh or any other shell create a file `/data/ssh/root/.profile` with below content assuming you have installed zsh through termux.
-```
-export PATH="/data/data/com.termux/files/usr/bin:$PATH"
-export SHELL="zsh"
-exec zsh
-```
 
 ## Available command
 

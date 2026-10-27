@@ -68,8 +68,7 @@ jobs:
 
         cd tailscale-build
 
-        patch -p1 < ../android.ssh.patch
-
+        sed -i '/func DefaultTailscaledSocket() string {/a\\tif runtime.GOOS == "android" {\n\t\treturn "/data/adb/tailscale/run/tailscaled.sock"\n\t}' paths/paths.go
         sed -i 's|/etc/resolv.conf|/data/adb/tailscale/etc/resolv.conf|g' net/dns/resolvconfpath_default.go
         sed -i 's|/etc/resolv.pre-tailscale-backup.conf|/data/adb/tailscale/etc/resolv.pre-tailscale-backup.conf|g' net/dns/resolvconfpath_default.go
 
@@ -81,7 +80,7 @@ jobs:
         NDK_BIN_PATH="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
         echo "Building for arm64"
-        CC=${NDK_BIN_PATH}/aarch64-linux-android21-clang CXX=${NDK_BIN_PATH}/aarch64-linux-android21-clang++ CGO_ENABLED=1 GOOS=android GOARCH=arm64 go build -tags ts_include_cli -ldflags "$ldflags -s -w" -o ./tailscale.combined -trimpath ./cmd/tailscaled
+        CC=${NDK_BIN_PATH}/aarch64-linux-android21-clang CXX=${NDK_BIN_PATH}/aarch64-linux-android21-clang++ CGO_ENABLED=1 GOOS=android GOARCH=arm64 go build -tags "ts_include_cli ts_omit_ssh" -ldflags "$ldflags -s -w" -o ./tailscale.combined -trimpath ./cmd/tailscaled
 
     - name: Install UPX
       uses: crazy-max/ghaction-upx@v3
