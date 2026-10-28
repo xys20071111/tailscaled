@@ -73,7 +73,6 @@ jobs:
         sed -i 's|/etc/resolv.pre-tailscale-backup.conf|/data/adb/tailscale/etc/resolv.pre-tailscale-backup.conf|g' net/dns/resolvconfpath_default.go
 
         patch -p1 < ../tailscale-android.patch
-        sed -i 's#^\t"strconv"$#\t"runtime"\n\t"strconv"#' wgengine/router/osrouter/router_linux.go
 
 
         eval `CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/mkversion`
@@ -84,7 +83,7 @@ jobs:
         NDK_BIN_PATH="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
 
         echo "Building for arm64"
-        CC=${NDK_BIN_PATH}/aarch64-linux-android21-clang CXX=${NDK_BIN_PATH}/aarch64-linux-android21-clang++ CGO_ENABLED=1 GOOS=android GOARCH=arm64 go build -tags "ts_include_cli ts_omit_ssh ts_omit_systray" -ldflags "$ldflags -s -w" -o ./tailscale.combined -trimpath ./cmd/tailscaled
+        CC=${NDK_BIN_PATH}/aarch64-linux-android21-clang CXX=${NDK_BIN_PATH}/aarch64-linux-android21-clang++ CGO_ENABLED=1 GOOS=android GOARCH=arm64 go build -tags "ts_include_cli ts_omit_aws ts_omit_bird ts_omit_tap ts_omit_kube ts_omit_completion ts_omit_completion_scripts ts_omit_wakeonlan ts_omit_capture ts_omit_systray ts_omit_syspolicy ts_omit_appconnectors ts_omit_identityfederation ts_omit_usermetrics ts_omit_logtail ts_omit_netlog ts_omit_linuxdnsfight ts_omit_tpm ts_omit_ssh" -ldflags "$ldflags -s -w" -o ./tailscale.combined -trimpath ./cmd/tailscaled
 
     - name: Install UPX
       uses: crazy-max/ghaction-upx@v3
