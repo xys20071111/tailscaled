@@ -1,14 +1,92 @@
+diff --git a/cmd/tailscale/cli/set.go b/cmd/tailscale/cli/set.go
+index ff2458b..6c9c8f5 100644
+--- a/cmd/tailscale/cli/set.go
++++ b/cmd/tailscale/cli/set.go
+@@ -113,7 +113,7 @@ func newSetFlagSet(goos string, setArgs *setArgsT) *flag.FlagSet {
+ 		setf.StringVar(&setArgs.opUser, "operator", "", "Unix username to allow to operate on tailscaled without sudo")
+ 	}
+ 	switch goos {
+-	case "linux":
++	case "linux", "android":
+ 		setf.BoolVar(&setArgs.snat, "snat-subnet-routes", true, "source NAT traffic to local routes advertised with --advertise-routes")
+ 		setf.BoolVar(&setArgs.statefulFiltering, "stateful-filtering", false, "apply stateful filtering to forwarded packets (subnet routers, exit nodes, and so on)")
+ 		setf.StringVar(&setArgs.netfilterMode, "netfilter-mode", defaultNetfilterMode(), "netfilter mode (one of on, nodivert, off)")
+diff --git a/cmd/tailscale/cli/up.go b/cmd/tailscale/cli/up.go
+index 13d2351..f999cc3 100644
+--- a/cmd/tailscale/cli/up.go
++++ b/cmd/tailscale/cli/up.go
+@@ -124,7 +124,7 @@ func newUpFlagSet(goos string, upArgs *upArgsT, cmd string) *flag.FlagSet {
+ 		upf.StringVar(&upArgs.opUser, "operator", "", "Unix username to allow to operate on tailscaled without sudo")
+ 	}
+ 	switch goos {
+-	case "linux":
++	case "linux", "android":
+ 		upf.BoolVar(&upArgs.snat, "snat-subnet-routes", true, "source NAT traffic to local routes advertised with --advertise-routes")
+ 		upf.BoolVar(&upArgs.statefulFiltering, "stateful-filtering", false, "apply stateful filtering to forwarded packets (subnet routers, exit nodes, and so on)")
+ 		upf.StringVar(&upArgs.netfilterMode, "netfilter-mode", defaultNetfilterMode(), "netfilter mode (one of on, nodivert, off)")
+diff --git a/cmd/tailscaled/tailscaled.go b/cmd/tailscaled/tailscaled.go
+index 1b0ee60..1ac16ec 100644
 --- a/cmd/tailscaled/tailscaled.go
 +++ b/cmd/tailscaled/tailscaled.go
-@@ -84,6 +84,8 @@
- 		return "auto"
- 	case "aix", "solaris", "illumos":
- 		return "userspace-networking"
+@@ -69,9 +69,42 @@
+ 	"tailscale.com/wgengine/router"
+ )
+ 
++// createTailscaleSymlink creates a "tailscale" symlink next to the current
++// "tailscaled" binary on Android, so that the combined tailscale/tailscaled
++// binary can be invoked under either name.
++func createTailscaleSymlink() {
++	execPath, err := os.Executable()
++	if err != nil {
++		return // Not critical.
++	}
++
++	realPath, err := filepath.EvalSymlinks(execPath)
++	if err != nil {
++		realPath = execPath
++	}
++
++	binName := filepath.Base(realPath)
++	symlinkPath := filepath.Join(filepath.Dir(realPath), "tailscale")
++
++	if _, err := os.Lstat(symlinkPath); err == nil {
++		// Already a symlink pointing at us? Then there is nothing to do.
++		if target, err := os.Readlink(symlinkPath); err == nil && target == binName {
++			return
++		}
++		os.Remove(symlinkPath)
++	}
++
++	_ = os.Symlink(binName, symlinkPath)
++}
++
+ // defaultTunName returns the default tun device name for the platform.
+ func defaultTunName() string {
+ 	switch runtime.GOOS {
 +	case "android":
++		// Try a real TUN device and fall back to netstack if the kernel
++		// does not let us create one (e.g. no /dev/net/tun, or a ROM
++		// that refuses the ioctl).
 +		return "tailscale0,userspace-networking"
- 	case "linux":
- 		if buildfeatures.HasSynology && buildfeatures.HasNetstack && distro.Get() == distro.Synology {
- 			// Try TUN, but fall back to userspace networking if needed.
+ 	case "openbsd":
+ 		return "tun"
+ 	case "windows":
+@@ -199,6 +232,13 @@ func shouldRunCLI() bool {
+ 
+ func main() {
+ 	envknob.PanicIfAnyEnvCheckedInInit()
++
++	// On Android the combined binary is installed as "tailscaled"; make
++	// sure "tailscale" resolves to it as well.
++	if runtime.GOOS == "android" {
++		createTailscaleSymlink()
++	}
++
+ 	if shouldRunCLI() {
+ 		beCLI()
+ 		return
+diff --git a/feature/taildrop/fileops_fs.go b/feature/taildrop/fileops_fs.go
+index 3ddf95d..070d12c 100644
 --- a/feature/taildrop/fileops_fs.go
 +++ b/feature/taildrop/fileops_fs.go
 @@ -1,6 +1,5 @@
@@ -18,6 +96,1265 @@
  
  package taildrop
  
+diff --git a/feature/taildrop/paths.go b/feature/taildrop/paths.go
+index 76054ef..f481ff6 100644
+--- a/feature/taildrop/paths.go
++++ b/feature/taildrop/paths.go
+@@ -7,6 +7,7 @@
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"runtime"
+ 
+ 	"tailscale.com/version/distro"
+ )
+@@ -25,6 +26,17 @@ func (e *Extension) SetFileOps(fileOps FileOps) {
+ }
+ 
+ func (e *Extension) setPlatformDefaultDirectFileRoot() {
++	if runtime.GOOS == "android" {
++		// On Android there is no FileOps hook (Storage Access Framework)
++		// when running as a standalone daemon, so received files are
++		// written straight to the shared Downloads directory.
++		const dir = "/sdcard/Download/Taildrop"
++		if err := os.MkdirAll(dir, 0o700); err == nil {
++			e.directFileRoot = dir
++		}
++		return
++	}
++
+ 	dg := distro.Get()
+ 
+ 	switch dg {
+diff --git a/hostinfo/hostinfo_android.go b/hostinfo/hostinfo_android.go
+new file mode 100644
+index 0000000..93cfcd7
+--- /dev/null
++++ b/hostinfo/hostinfo_android.go
+@@ -0,0 +1,80 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package hostinfo
++
++import (
++	"os/exec"
++	"strings"
++
++	"tailscale.com/tailcfg"
++)
++
++// On Android the kernel hostname is either unset or "localhost", so the node
++// would otherwise show up as "localhost" in the admin console. Fill in the
++// manufacturer/model and the OS version from getprop instead.
++func init() {
++	RegisterHostinfoNewHook(func(hi *tailcfg.Hostinfo) {
++		if hi.Hostname == "" || hi.Hostname == "node" || hi.Hostname == "localhost" {
++			hi.Hostname = sanitizeHostname(
++				getSystemProperty("ro.product.manufacturer") + "-" +
++					getSystemProperty("ro.product.model"),
++			)
++			if hi.Hostname == "" {
++				hi.Hostname = "android"
++			}
++		}
++
++		if hi.OSVersion == "" {
++			hi.OSVersion = getSystemProperty("ro.build.version.release")
++		}
++
++		if hi.DeviceModel == "" {
++			hi.DeviceModel = getSystemProperty("ro.product.model")
++		}
++	})
++}
++
++// getSystemProperty reads an Android system property via getprop.
++func getSystemProperty(prop string) string {
++	out, err := exec.Command("getprop", prop).Output()
++	if err != nil {
++		return ""
++	}
++	return strings.TrimSpace(string(out))
++}
++
++// sanitizeHostname removes characters that are not valid in a hostname.
++// Valid hostnames contain only alphanumerics and hyphens.
++func sanitizeHostname(s string) string {
++	s = strings.ToLower(s)
++	var result strings.Builder
++
++	for _, ch := range s {
++		switch {
++		case (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9'):
++			result.WriteRune(ch)
++		case ch == '-' || ch == '_' || ch == ' ':
++			// Convert spaces and underscores to hyphens, without
++			// producing runs of them.
++			if b := result.String(); b != "" && b[len(b)-1] != '-' {
++				result.WriteRune('-')
++			}
++		}
++	}
++
++	hostname := result.String()
++	hostname = strings.Trim(hostname, "-")
++	for strings.Contains(hostname, "--") {
++		hostname = strings.ReplaceAll(hostname, "--", "-")
++	}
++
++	// Limit to 63 characters (max label length in a hostname).
++	if len(hostname) > 63 {
++		hostname = strings.TrimRight(hostname[:63], "-")
++	}
++
++	return hostname
++}
+diff --git a/ipn/ipnserver/actor.go b/ipn/ipnserver/actor.go
+index 985a6ef..7a5c45c 100644
+--- a/ipn/ipnserver/actor.go
++++ b/ipn/ipnserver/actor.go
+@@ -145,7 +145,7 @@ func (a *actor) Username() (string, error) {
+ 		}
+ 		defer tok.Close()
+ 		return tok.Username()
+-	case "darwin", "linux", "illumos", "solaris", "openbsd", "freebsd":
++	case "darwin", "linux", "android", "illumos", "solaris", "openbsd", "freebsd":
+ 		creds := a.ci.Creds()
+ 		if creds == nil {
+ 			return "", errors.New("peer credentials not implemented on this OS")
+diff --git a/logpolicy/logpolicy.go b/logpolicy/logpolicy.go
+index 542e460..382e2fe 100644
+--- a/logpolicy/logpolicy.go
++++ b/logpolicy/logpolicy.go
+@@ -250,6 +250,17 @@ func LogsDir(logf logger.Logf) string {
+ 		return ""
+ 	}
+ 
++	if runtime.GOOS == "android" {
++		if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
++			return "/data/adb/tailscale/log"
++		}
++		prefix := os.Getenv("PREFIX")
++		if prefix == "" {
++			return filepath.Join(os.TempDir(), "tailscale", "log")
++		}
++		return filepath.Join(prefix, "var", "log", "tailscale")
++	}
++
+ 	// Default to e.g. /var/lib/tailscale or /var/db/tailscale on Unix.
+ 	if d := paths.DefaultTailscaledStateFile(); d != "" {
+ 		d = filepath.Dir(d) // directory of e.g. "/var/lib/tailscale/tailscaled.state"
+diff --git a/net/dns/manager_android.go b/net/dns/manager_android.go
+new file mode 100644
+index 0000000..d2ba8fa
+--- /dev/null
++++ b/net/dns/manager_android.go
+@@ -0,0 +1,122 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package dns
++
++import (
++	"github.com/coreos/go-iptables/iptables"
++
++	"tailscale.com/control/controlknobs"
++	"tailscale.com/health"
++	"tailscale.com/net/tsaddr"
++	"tailscale.com/types/logger"
++	"tailscale.com/util/eventbus"
++	"tailscale.com/util/syspolicy/policyclient"
++)
++
++// androidManager configures DNS on Android by redirecting DNS traffic to the
++// Tailscale service IP with iptables DNAT, where tailscaled answers it from
++// netstack.
++//
++// Android has no writable resolv.conf: DNS servers are handed to apps by netd
++// through the netlink connector, and tailscaled cannot change that. DNATing
++// port 53 works for every app on the device as well as for clients of a
++// hotspot, and it is the only way a non-VPN-service daemon can take over DNS.
++type androidManager struct {
++	logf     logger.Logf
++	hijacked bool
++}
++
++// NewOSConfigurator returns the Android DNS configurator.
++func NewOSConfigurator(logf logger.Logf, _ *health.Tracker, _ *eventbus.Bus, _ policyclient.Client, _ *controlknobs.Knobs, _ string) (OSConfigurator, error) {
++	return &androidManager{logf: logf}, nil
++}
++
++func (m *androidManager) SetDNS(cfg OSConfig) error {
++	// Only hijack when Tailscale has DNS servers to serve; with
++	// --accept-dns=false the Android setting is left untouched.
++	shouldHijack := len(cfg.Nameservers) > 0
++
++	if shouldHijack && !m.hijacked {
++		if err := setDNSRules(false, true); err != nil {
++			m.logf("dns: failed to setup rules: %v", err)
++			return err
++		}
++		if err := setDNSRules(true, true); err != nil {
++			m.logf("dns: ipv6 rules failed (non-fatal): %v", err)
++		}
++		m.hijacked = true
++		m.logf("dns: hijack enabled")
++	} else if !shouldHijack {
++		// Always clean up rules when DNS is disabled, regardless of
++		// the tracked state.
++		if err := setDNSRules(false, false); err != nil {
++			m.logf("dns: failed to remove rules: %v", err)
++		}
++		if err := setDNSRules(true, false); err != nil {
++			m.logf("dns: ipv6 rules removal failed (non-fatal): %v", err)
++		}
++		if m.hijacked {
++			m.hijacked = false
++			m.logf("dns: hijack disabled")
++		}
++	}
++	return nil
++}
++
++func (m *androidManager) SupportsSplitDNS() bool { return false }
++
++func (m *androidManager) GetBaseConfig() (OSConfig, error) {
++	return OSConfig{}, ErrGetBaseConfigNotSupported
++}
++
++func (m *androidManager) Close() error {
++	if m.hijacked {
++		setDNSRules(false, false)
++		setDNSRules(true, false)
++		m.hijacked = false
++		m.logf("dns: hijack disabled")
++	}
++	return nil
++}
++
++// setDNSRules adds or removes the iptables rules that DNAT DNS traffic to the
++// Tailscale service IP, skipping traffic that already goes to the tunnel.
++func setDNSRules(ipv6 bool, add bool) error {
++	proto := iptables.ProtocolIPv4
++	dnsIP := tsaddr.TailscaleServiceIPString
++	if ipv6 {
++		proto = iptables.ProtocolIPv6
++		dnsIP = tsaddr.TailscaleServiceIPv6String
++	}
++
++	ipt, err := iptables.NewWithProtocol(proto)
++	if err != nil {
++		return err
++	}
++
++	rules := []struct {
++		table string
++		chain string
++		args  []string
++	}{
++		// Redirect local DNS to Tailscale (exclude tun interfaces).
++		{"nat", "OUTPUT", []string{"!", "-o", "tun+", "!", "-d", dnsIP, "-p", "udp", "--dport", "53", "-j", "DNAT", "--to-destination", dnsIP + ":53"}},
++		// Redirect hotspot DNS to Tailscale (exclude tun interfaces).
++		{"nat", "PREROUTING", []string{"!", "-i", "tun+", "-p", "udp", "--dport", "53", "-j", "DNAT", "--to-destination", dnsIP + ":53"}},
++	}
++
++	for _, rule := range rules {
++		if add {
++			if err := ipt.Append(rule.table, rule.chain, rule.args...); err != nil {
++				return err
++			}
++		} else {
++			ipt.Delete(rule.table, rule.chain, rule.args...)
++		}
++	}
++
++	return nil
++}
+diff --git a/net/dns/manager_default.go b/net/dns/manager_default.go
+index b514a74..075aa90 100644
+--- a/net/dns/manager_default.go
++++ b/net/dns/manager_default.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & contributors
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build (!linux || android) && !freebsd && !openbsd && !windows && !darwin && !illumos && !solaris && !plan9
++//go:build (!linux || android) && !android && !freebsd && !openbsd && !windows && !darwin && !illumos && !solaris && !plan9
+ 
+ package dns
+ 
+diff --git a/net/dns/resolvconfpath_android.go b/net/dns/resolvconfpath_android.go
+new file mode 100644
+index 0000000..f2ae079
+--- /dev/null
++++ b/net/dns/resolvconfpath_android.go
+@@ -0,0 +1,28 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package dns
++
++import (
++	"os"
++	"path/filepath"
++)
++
++var (
++	resolvConf string
++	backupConf string
++)
++
++func init() {
++	prefix := os.Getenv("PREFIX")
++	if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
++		prefix = "/data/adb/tailscale"
++	} else if prefix == "" {
++		prefix = filepath.Join(os.TempDir(), "tailscale")
++	}
++	dnsDir := filepath.Join(prefix, "etc")
++	resolvConf = filepath.Join(dnsDir, "resolv.conf")
++	backupConf = filepath.Join(dnsDir, "resolv.pre-tailscale-backup.conf")
++}
+diff --git a/net/dns/resolvconfpath_default.go b/net/dns/resolvconfpath_default.go
+index 00caf30..a62dcd4 100644
+--- a/net/dns/resolvconfpath_default.go
++++ b/net/dns/resolvconfpath_default.go
+@@ -1,7 +1,7 @@
+ // Copyright (c) Tailscale Inc & contributors
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
+-//go:build !gokrazy
++//go:build !gokrazy && !android
+ 
+ package dns
+ 
+diff --git a/net/netmon/ruledeleted_android.go b/net/netmon/ruledeleted_android.go
+new file mode 100644
+index 0000000..59f95dc
+--- /dev/null
++++ b/net/netmon/ruledeleted_android.go
+@@ -0,0 +1,19 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package netmon
++
++// RuleDeleted reports that one of Tailscale's policy routing rules was
++// deleted.
++//
++// Android builds netmon with the polling implementation, which does not watch
++// for rule deletions, but the Linux router still subscribes to this event
++// type, so it has to exist for android as well.
++type RuleDeleted struct {
++	// Table is the table number that the deleted rule referenced.
++	Table uint8
++	// Priority is the priority of the deleted rule.
++	Priority uint32
++}
+diff --git a/net/netns/netns_android.go b/net/netns/netns_android.go
+index 7c5fe32..46ebc5a 100644
+--- a/net/netns/netns_android.go
++++ b/net/netns/netns_android.go
+@@ -7,11 +7,16 @@
+ 
+ import (
+ 	"fmt"
++	"log"
+ 	"sync"
++	"sync/atomic"
+ 	"syscall"
+ 
++	"golang.org/x/sys/unix"
++
+ 	"tailscale.com/net/netmon"
+ 	"tailscale.com/types/logger"
++	"tailscale.com/util/linuxfw"
+ )
+ 
+ var (
+@@ -20,11 +25,25 @@
+ 
+ 	androidBindToNetworkFuncMu sync.Mutex
+ 	androidBindToNetworkFunc   func(fd int) error
++
++	// androidSkipSocketMark is set after a failed SO_MARK setsockopt, so
++	// that we stop trying (and don't slow every dial down) on systems
++	// where marking is not permitted.
++	androidSkipSocketMark atomic.Bool
++
++	// androidLastLoggedMark is the last socket mark value we logged, so
++	// that state changes (marked / unmarked / new network) are logged once.
++	androidLastLoggedMark atomic.Int32
+ )
+ 
+-// UseSocketMark reports whether SO_MARK is in use. Android does not use SO_MARK.
++func init() { androidLastLoggedMark.Store(-1) }
++
++// UseSocketMark reports whether SO_MARK is in use. A standalone (root)
++// tailscaled on Android uses SO_MARK to keep its own sockets out of other
++// VPN apps and out of the Tailscale routing table, like on Linux. The
++// official Android app instead uses the JNI protect/bind funcs below.
+ func UseSocketMark() bool {
+-	return false
++	return true
+ }
+ 
+ // SetAndroidProtectFunc register a func that Android provides that JNI calls into
+@@ -65,11 +84,48 @@ func control(logger.Logf, *netmon.Monitor) func(network, address string, c sysca
+ 	return controlC
+ }
+ 
++// androidSocketMark returns the SO_MARK value that routes tailscaled's own
++// sockets straight out of the underlying physical network, or 0 when marking
++// is not possible. The mark replicates what VpnService.protect does for the
++// VPN app itself:
++//
++//   - bits 0-15: the netId of the underlying physical network, so netd's
++//     per-network rules look the socket up in that network's routing table
++//     instead of the default network's (which is the tunnel of another VPN
++//     app whenever one is connected);
++//   - bit 16 ("explicitly selected"), so the implicit and default-network
++//     rules, which match on an unset bit 16, are skipped;
++//   - bit 17 ("protected from VPN"), so per-UID VPN rules skip the socket
++//     even when the VPN applies to our UID;
++//   - Tailscale's own bypass bit (bit 28), so Tailscale's exit-node ip
++//     rule (not fwmark bypass -> lookup table 52) skips its own traffic
++//     and does not loop it back into the tunnel.
++//
++// The value is detected and validated (with a real kernel route lookup) by
++// util/linuxfw.AndroidSocketMark; 0 means "do not mark", which is always
++// safe: it keeps the pre-marking behavior.
++func androidSocketMark() (mark int) {
++	mark, _ = linuxfw.AndroidSocketMark()
++	if int32(mark) != androidLastLoggedMark.Swap(int32(mark)) {
++		if mark == 0 {
++			log.Printf("netns: no validated Android SO_MARK available, not marking sockets")
++		} else {
++			log.Printf("netns: marking sockets with fwmark %#x", mark)
++		}
++	}
++	return mark
++}
++
+ // controlC marks c as necessary to dial in a separate network namespace.
+ //
+ // It's intentionally the same signature as net.Dialer.Control
+ // and net.ListenConfig.Control.
+ func controlC(network, address string, c syscall.RawConn) error {
++	if isLocalhost(address) {
++		// Don't mark localhost connections.
++		return nil
++	}
++
+ 	var sockErr error
+ 
+ 	err := c.Control(func(fd uintptr) {
+@@ -84,6 +140,19 @@ func controlC(network, address string, c syscall.RawConn) error {
+ 				sockErr = err
+ 				return
+ 			}
++		} else if !androidSkipSocketMark.Load() {
++			// Standalone (root) daemon: emulate VpnService.protect with
++			// SO_MARK so that the daemon's own traffic is neither captured
++			// by another VPN app's tunnel nor routed over Tailscale itself.
++			// Best effort: marking is an optimization here, a failure must
++			// not break dialing.
++			if mark := androidSocketMark(); mark != 0 {
++				if err := unix.SetsockoptInt(fdInt, unix.SOL_SOCKET, unix.SO_MARK, mark); err != nil {
++					if !androidSkipSocketMark.Swap(true) {
++						log.Printf("netns: failed to set Android SO_MARK (%v), continuing without socket marks", err)
++					}
++				}
++			}
+ 		}
+ 
+ 		if disableAndroidBindToActiveNetwork.Load() {
+diff --git a/paths/paths.go b/paths/paths.go
+index 77605a1..9d7c6ba 100644
+--- a/paths/paths.go
++++ b/paths/paths.go
+@@ -53,6 +53,18 @@ func WindowsDevTailscaledSocket() string {
+ // DefaultTailscaledSocket returns the path to the tailscaled Unix socket
+ // or the empty string if there's no reasonable default.
+ func DefaultTailscaledSocket() string {
++	if runtime.GOOS == "android" {
++		// tailscaled runs as a Magisk/KernelSU module under
++		// /data/adb/tailscale, next to the CLI.
++		if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
++			return "/data/adb/tailscale/run/tailscaled.sock"
++		}
++		prefix := os.Getenv("PREFIX")
++		if prefix == "" {
++			return filepath.Join(os.TempDir(), "tailscale", "tailscaled.sock")
++		}
++		return filepath.Join(prefix, "var", "run", "tailscaled.sock")
++	}
+ 	if runtime.GOOS == "windows" {
+ 		return WindowsProtectedPipePrefix + `Tailscale\tailscaled`
+ 	}
+@@ -131,7 +143,7 @@ func DefaultTailscaledStateDir() string {
+ // when it's absent.
+ func MakeAutomaticStateDir() bool {
+ 	switch runtime.GOOS {
+-	case "plan9":
++	case "plan9", "android":
+ 		return true
+ 	case "linux":
+ 		if distro.Get() == distro.JetKVM {
+diff --git a/paths/paths_unix.go b/paths/paths_unix.go
+index b1556b2..03365b5 100644
+--- a/paths/paths_unix.go
++++ b/paths/paths_unix.go
+@@ -33,6 +33,15 @@ func statePath() string {
+ 		return "/Library/Tailscale/tailscaled.state"
+ 	case "aix":
+ 		return "/var/tailscale/tailscaled.state"
++	case "android":
++		if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
++			return "/data/adb/tailscale/run/tailscaled.state"
++		}
++		prefix := os.Getenv("PREFIX")
++		if prefix == "" {
++			return filepath.Join(os.TempDir(), "tailscale", "tailscaled.state")
++		}
++		return filepath.Join(prefix, "var", "lib", "tailscale", "tailscaled.state")
+ 	default:
+ 		return ""
+ 	}
+diff --git a/tailscale.combined b/tailscale.combined
+new file mode 100755
+index 0000000..091eb0b
+Binary files /dev/null and b/tailscale.combined differ
+diff --git a/tsconst/linuxfw.go b/tsconst/linuxfw.go
+index 3a7a4cf..c5f5586 100644
+--- a/tsconst/linuxfw.go
++++ b/tsconst/linuxfw.go
+@@ -1,6 +1,8 @@
+ // Copyright (c) Tailscale Inc & contributors
+ // SPDX-License-Identifier: BSD-3-Clause
+ 
++//go:build !android
++
+ package tsconst
+ 
+ // Linux firewall constants used by Tailscale.
+diff --git a/tsconst/linuxfw_android.go b/tsconst/linuxfw_android.go
+new file mode 100644
+index 0000000..ed05228
+--- /dev/null
++++ b/tsconst/linuxfw_android.go
+@@ -0,0 +1,68 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package tsconst
++
++// Linux firewall constants used by Tailscale on Android.
++
++// The following bits are added to packet marks for Tailscale use.
++//
++// On Android, netd owns the fwmark layout. Bits 0-20 are allocated by AOSP,
++// so Tailscale cannot use the Linux default bits 16:23 and claims bits
++// 25:28 instead.
++//
++// Bits 0-20 of the mark still have to follow netd's conventions so that
++// tailscaled's own sockets are routed like sockets protected with
++// VpnService.protect: with the underlying physical network's netId in bits
++// 0-15 and the "explicitly selected" and "protected from VPN" bits set.
++// Without them, a foreign VPN app that is the default network captures all
++// of tailscaled's traffic (WireGuard UDP, DERP, control plane) through its
++// tunnel. See util/linuxfw/android_net.go for how the netId is detected.
++//
++// Ref: https://android.googlesource.com/platform/system/netd/+/master/include/Fwmark.h
++// Ref: https://android.googlesource.com/platform/system/netd/+/master/server/RouteController.h
++// Ref: https://www.kxxt.dev/blog/full-tailscale-on-android-and-remote-unlocking/
++//
++// The constants are in the iptables/iproute2 string format for
++// matching and setting the bits, so they can be directly embedded in
++// commands.
++const (
++	// The mask for reading/writing the 'firewall mask' bits on a packet.
++	// We claim bits 25:28 entirely.
++	LinuxFwmarkMask    = "0x1e000000"
++	LinuxFwmarkMaskNum = 0x1e000000
++
++	// Packet is from Tailscale and to a subnet route destination, so
++	// is allowed to be routed through this machine.
++	LinuxSubnetRouteMark    = "0x8000000"
++	LinuxSubnetRouteMarkNum = 0x8000000
++
++	// Packet was originated by tailscaled itself, and must not be
++	// routed over the Tailscale network.
++	//
++	// Includes bit 17 (0x20000), Android's ProtectedFromVPN mark.
++	LinuxBypassMark    = "0x10020000"
++	LinuxBypassMarkNum = 0x10020000
++)
++
++// Android netd fwmark bits (AOSP system/netd include/Fwmark.h). Bits 0-15
++// hold the netId of the network a packet belongs to.
++const (
++	// NetdExplicitlySelected is bit 16: the socket (or packet mark) has
++	// explicitly selected the network in the netId bits.
++	NetdExplicitlySelected = 0x10000
++
++	// NetdProtectedFromVPN is bit 17: the packet must not be routed
++	// through a VPN app's tunnel. Already part of LinuxBypassMarkNum.
++	NetdProtectedFromVPN = 0x20000
++
++	// NetdPermissionBits covers both netd permission bits (18-19,
++	// PERMISSION_NETWORK and PERMISSION_SYSTEM), so that a root daemon's
++	// sockets match netd's per-network explicit rules of any network.
++	NetdPermissionBits = 0xc0000
++
++	// NetdNetIDMask masks the netId bits (0-15).
++	NetdNetIDMask = 0xffff
++)
+diff --git a/tsweb/tsweb.go b/tsweb/tsweb.go
+index b5bda2a..0d6ba83 100644
+--- a/tsweb/tsweb.go
++++ b/tsweb/tsweb.go
+@@ -42,6 +42,16 @@
+ var DevMode bool
+ 
+ func DefaultCertDir(leafDir string) string {
++	if runtime.GOOS == "android" {
++		if fi, err := os.Stat("/data/adb/tailscale"); err == nil && fi.IsDir() {
++			return "/data/adb/tailscale/certs"
++		}
++		prefix := os.Getenv("PREFIX")
++		if prefix == "" {
++			return filepath.Join(os.TempDir(), "tailscale", "certs")
++		}
++		return filepath.Join(prefix, "var", "lib", "tailscale", "certs")
++	}
+ 	cacheDir, err := os.UserCacheDir()
+ 	if err == nil {
+ 		return filepath.Join(cacheDir, "tailscale", leafDir)
+diff --git a/util/linuxfw/android_net.go b/util/linuxfw/android_net.go
+new file mode 100644
+index 0000000..167fcab
+--- /dev/null
++++ b/util/linuxfw/android_net.go
+@@ -0,0 +1,354 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package linuxfw
++
++import (
++	"log"
++	"net"
++	"os/exec"
++	"sort"
++	"strconv"
++	"strings"
++	"sync"
++	"time"
++
++	"golang.org/x/sys/unix"
++
++	"github.com/tailscale/netlink"
++	"tailscale.com/tsconst"
++)
++
++// On Android, netd keeps every network in its own routing table and selects
++// between them with policy routing rules keyed on fwmarks:
++//
++//   - a physical network's routes live in table (interface index + 1000)
++//     (RouteController.ROUTE_TABLE_OFFSET_FROM_INDEX), and netd installs
++//     per-network rules whose fwmark match value carries the network's netId
++//     in the low 16 bits;
++//   - the rule at priority 31000 (RULE_PRIORITY_DEFAULT_NETWORK) sends all
++//     packets whose netId mark bits are zero into the default network, which
++//     is a VPN app's tunnel (e.g. v2rayNG) whenever one is connected.
++//
++// A root tailscaled therefore has to mark its own sockets the way
++// VpnService.protect does: with the underlying physical network's netId plus
++// the "explicitly selected" and "protected from VPN" bits, so that the
++// per-network rules (explicit at priority 16000, or implicit at 23000) route
++// its packets straight out of the physical interface, and so that per-UID VPN
++// rules skip them.
++//
++// AndroidSocketMark detects the netId of the physical network that currently
++// holds the default route (from the policy rules, falling back to netd's
++// mangle rules) and validates candidate mark values with a real kernel route
++// lookup (a UDP connect with SO_MARK set), so that a mark that does not
++// resolve to a usable route on this device is never applied. Callers must
++// treat a 0 return value as "do not mark".
++
++const (
++	androidNetInfoCacheTTL  = 3 * time.Second
++	androidNetInfoLogPeriod = 30 * time.Second
++)
++
++var (
++	androidNetInfoMu    sync.Mutex
++	androidNetInfoCache androidNetInfo
++	androidNetInfoAt    time.Time
++	androidNetInfoSeen  time.Time // last diagnostic log time
++)
++
++type androidNetInfo struct {
++	routeTable int
++	netID      int
++	mark       int
++}
++
++// androidMarkCandidates returns the SO_MARK values to try for the given
++// netId, most preferred first. All of them carry Tailscale's bypass bit
++// (bit 28) and the protected-from-VPN bit (bit 17); they differ in whether
++// the "explicitly selected" bit (16) and the netd permission bits (18-19)
++// are set, which changes which of netd's per-network rules match:
++//
++//   - explicit + protected: matches netd's explicit per-network rules at
++//     priority 16000, exactly like VpnService.protect;
++//   - explicit + protected + permissions: also matches the explicit rules
++//     of permission-gated networks;
++//   - protected only: matches netd's implicit per-network rules at priority
++//     23000 (permission-less networks).
++func androidMarkCandidates(netID int) []int {
++	base := tsconst.LinuxBypassMarkNum | netID&tsconst.NetdNetIDMask
++	return []int{
++		base | tsconst.NetdExplicitlySelected,
++		base | tsconst.NetdExplicitlySelected | tsconst.NetdPermissionBits,
++		base,
++	}
++}
++
++// AndroidSocketMark returns the SO_MARK value that routes tailscaled's own
++// sockets straight out of the underlying physical network, or 0 when no
++// validated mark is available (detection failed or the device's policy
++// routing rejects every candidate). 0 means "do not mark".
++func AndroidSocketMark() (mark, netID int) {
++	androidNetInfoMu.Lock()
++	defer androidNetInfoMu.Unlock()
++
++	if !androidNetInfoAt.IsZero() && time.Since(androidNetInfoAt) < androidNetInfoCacheTTL {
++		return androidNetInfoCache.mark, androidNetInfoCache.netID
++	}
++
++	info := detectAndroidDefaultPhysicalNetwork()
++	androidNetInfoAt = time.Now()
++	if info.routeTable > 0 {
++		androidNetInfoCache = info
++	}
++	return androidNetInfoCache.mark, androidNetInfoCache.netID
++}
++
++// AndroidDefaultPhysicalNetwork returns the number of the routing table of
++// the physical (non-tunnel) network that currently holds the default route,
++// and its netd netId. Both are 0 when detection fails.
++func AndroidDefaultPhysicalNetwork() (routeTable, netID int) {
++	androidNetInfoMu.Lock()
++	defer androidNetInfoMu.Unlock()
++
++	if androidNetInfoAt.IsZero() || time.Since(androidNetInfoAt) >= androidNetInfoCacheTTL {
++		info := detectAndroidDefaultPhysicalNetwork()
++		androidNetInfoAt = time.Now()
++		if info.routeTable > 0 {
++			androidNetInfoCache = info
++		}
++	}
++	return androidNetInfoCache.routeTable, androidNetInfoCache.netID
++}
++
++func detectAndroidDefaultPhysicalNetwork() androidNetInfo {
++	ifaces, err := net.Interfaces()
++	if err != nil {
++		return androidNetInfo{}
++	}
++	ifName := make(map[int]string, len(ifaces))
++	for _, ifc := range ifaces {
++		ifName[ifc.Index] = ifc.Name
++	}
++
++	// Dump the routes of every routing table. RouteList only returns the
++	// main table, so ask for a table-filtered dump with the wildcard
++	// (unspecified) table to get netd's per-network tables too.
++	routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{}, netlink.RT_FILTER_TABLE)
++	if err != nil {
++		logNoValidMarkf("route dump failed: %v", err)
++		return androidNetInfo{}
++	}
++
++	type candidate struct {
++		ifname string
++		table  int
++		metric int
++	}
++	var cands []candidate
++	for _, r := range routes {
++		if r.Dst != nil || r.Table <= 0 {
++			continue // not a default route, or not a netd table
++		}
++		name := ifName[r.LinkIndex]
++		if !isAndroidPhysicalInterface(name) {
++			continue
++		}
++		cands = append(cands, candidate{ifname: name, table: r.Table, metric: r.Priority})
++	}
++	sort.SliceStable(cands, func(i, j int) bool { return cands[i].metric < cands[j].metric })
++	if len(cands) == 0 {
++		logNoValidMarkf("no default route via a physical interface")
++		return androidNetInfo{}
++	}
++
++	rules, err := netlink.RuleList(netlink.FAMILY_V4)
++	if err != nil {
++		logNoValidMarkf("rule dump failed: %v", err)
++		return androidNetInfo{}
++	}
++
++	// netd's per-network rules look up a network's own table and match on
++	// the netId bits of the fwmark, so a rule pointing at a table tells us
++	// which netId belongs to it. Requiring such a rule validates that the
++	// candidate table really is a netd-managed network.
++	netIDsFor := func(table int) []int {
++		var ids []int
++		for _, rule := range rules {
++			if rule.Table != table || rule.Mask&0xffff == 0 {
++				continue
++			}
++			if id := rule.Mark & 0xffff; id != 0 && !slicesContains(ids, id) {
++				ids = append(ids, id)
++			}
++		}
++		return ids
++	}
++
++	for _, cand := range cands {
++		var tried []int
++
++		// Source 1: the policy rules that point at this network's table.
++		for _, netID := range netIDsFor(cand.table) {
++			tried = append(tried, netID)
++			mark, err := tryMarkForNetID(netID)
++			if err == nil {
++				return androidNetInfo{routeTable: cand.table, netID: netID, mark: mark}
++			}
++			if err != errNoValidMark {
++				logNoValidMarkf("netId %#x: %v", netID, err)
++			}
++		}
++
++		// Source 2: netd's incoming-packet marks in the mangle table carry
++		// the netId of the network behind each physical interface and are
++		// independent of the policy rule layout.
++		for _, netID := range netIDsFromMangle(cand.ifname) {
++			if slicesContains(tried, netID) {
++				continue
++			}
++			tried = append(tried, netID)
++			mark, err := tryMarkForNetID(netID)
++			if err == nil {
++				return androidNetInfo{routeTable: cand.table, netID: netID, mark: mark}
++			}
++			if err != errNoValidMark {
++				logNoValidMarkf("netId %#x (mangle): %v", netID, err)
++			}
++		}
++
++		if len(tried) > 0 {
++			logNoValidMarkf("table %d (%s): no validated netId among %v", cand.table, cand.ifname, tried)
++		} else {
++			logNoValidMarkf("table %d (%s): no netId found in policy rules or mangle marks", cand.table, cand.ifname)
++		}
++	}
++	return androidNetInfo{}
++}
++
++// errNoValidMark is returned by tryMarkForNetID when every candidate mark for
++// a netId was rejected by the kernel's route lookup.
++var errNoValidMark = errStr("no validated mark")
++
++type errStr string
++
++func (e errStr) Error() string { return string(e) }
++
++// tryMarkForNetID returns the first candidate mark for netID that a real
++// kernel route lookup accepts. The returned error is errNoValidMark when the
++// lookup failed for all candidates, or the underlying error when the mark
++// could not be applied at all (e.g. a setsockopt failure).
++func tryMarkForNetID(netID int) (int, error) {
++	lastErr := error(errNoValidMark)
++	for _, mark := range androidMarkCandidates(netID) {
++		ok, err := markRoutesV4(mark)
++		if ok {
++			return mark, nil
++		}
++		if err != nil {
++			lastErr = err
++		}
++	}
++	return 0, lastErr
++}
++
++// markRoutesV4 reports whether a route lookup for a public IPv4 address
++// succeeds with the given SO_MARK applied. It uses a datagram socket
++// connect(), which performs exactly the same policy routing walk as a real
++// dial but sends no packet. ok=false with a nil error means the kernel's
++// policy routing found no route for the marked socket.
++func markRoutesV4(mark int) (ok bool, err error) {
++	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
++	if err != nil {
++		return false, err
++	}
++	defer unix.Close(fd)
++
++	if err := unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, mark); err != nil {
++		return false, err
++	}
++	if err := unix.Connect(fd, &unix.SockaddrInet4{Port: 53, Addr: [4]byte{8, 8, 8, 8}}); err != nil {
++		return false, nil
++	}
++	return true, nil
++}
++
++// netIDsFromMangle parses netd's incoming-packet mark rules
++// (RouteController::modifyIncomingPacketMark, installed in the mangle table
++// for every physical network) and returns the netIds they set for the given
++// interface. The rules look like:
++//
++//	-A routectrl_mangle_INPUT -i wlan0 -j MARK --set-xmark 0x10066/0xfeffffff
++func netIDsFromMangle(ifname string) []int {
++	if ifname == "" {
++		return nil
++	}
++	out, err := exec.Command("iptables", "-t", "mangle", "-S").Output()
++	if err != nil {
++		return nil
++	}
++	var ids []int
++	for _, line := range strings.Split(string(out), "\n") {
++		if !strings.Contains(line, "-i "+ifname+" ") {
++			continue
++		}
++		marker := "--set-xmark "
++		m := strings.Index(line, marker)
++		if m == -1 {
++			marker = "--set-mark "
++			m = strings.Index(line, marker)
++		}
++		if m == -1 {
++			continue
++		}
++		value := line[m+len(marker):]
++		if slash := strings.IndexByte(value, '/'); slash != -1 {
++			value = value[:slash]
++		}
++		v, err := strconv.ParseUint(strings.TrimSpace(value), 0, 32)
++		if err != nil {
++			continue
++		}
++		if id := int(v) & tsconst.NetdNetIDMask; id != 0 && !slicesContains(ids, id) {
++			ids = append(ids, id)
++		}
++	}
++	return ids
++}
++
++func slicesContains(s []int, v int) bool {
++	for _, e := range s {
++		if e == v {
++			return true
++		}
++	}
++	return false
++}
++
++// logNoValidMarkf logs a detection diagnostic at most once per
++// androidNetInfoLogPeriod so failures stay visible without spamming.
++func logNoValidMarkf(format string, args ...any) {
++	now := time.Now()
++	if !androidNetInfoSeen.IsZero() && now.Sub(androidNetInfoSeen) < androidNetInfoLogPeriod {
++		return
++	}
++	androidNetInfoSeen = now
++	log.Printf("linuxfw/android: "+format, args...)
++}
++
++// isAndroidPhysicalInterface reports whether name looks like a physical
++// uplink interface instead of a tunnel or virtual interface created by a
++// VPN app or by Tailscale itself.
++func isAndroidPhysicalInterface(name string) bool {
++	switch name {
++	case "", "lo", "sit0", "ip6tnl0":
++		return false
++	}
++	for _, prefix := range []string{"tun", "tailscale", "wg", "dummy", "v4-"} {
++		if strings.HasPrefix(name, prefix) {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/util/linuxfw/android_net_stub.go b/util/linuxfw/android_net_stub.go
+new file mode 100644
+index 0000000..fc2e3c9
+--- /dev/null
++++ b/util/linuxfw/android_net_stub.go
+@@ -0,0 +1,10 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build linux && !android
++
++package linuxfw
++
++// AndroidDefaultPhysicalNetwork is only implemented on Android; on plain
++// Linux there are no netd policy rules to work around.
++func AndroidDefaultPhysicalNetwork() (routeTable, netID int) { return 0, 0 }
+diff --git a/util/linuxfw/iptables.go b/util/linuxfw/iptables.go
+index 3bd2c28..cd48b39 100644
+--- a/util/linuxfw/iptables.go
++++ b/util/linuxfw/iptables.go
+@@ -214,6 +214,9 @@ func clearRules(proto iptables.Protocol, logf logger.Logf) error {
+ 	if err := delTSHook(ipt, "filter", "FORWARD", logf); err != nil {
+ 		errs = append(errs, err)
+ 	}
++	if err := delTSHook(ipt, "mangle", "PREROUTING", logf); err != nil {
++		errs = append(errs, err)
++	}
+ 	if err := delTSHook(ipt, "nat", "POSTROUTING", logf); err != nil {
+ 		errs = append(errs, err)
+ 	}
+@@ -224,6 +227,9 @@ func clearRules(proto iptables.Protocol, logf logger.Logf) error {
+ 	if err := delChain(ipt, "filter", "ts-forward"); err != nil {
+ 		errs = append(errs, err)
+ 	}
++	if err := delChain(ipt, "mangle", "ts-prerouting"); err != nil {
++		errs = append(errs, err)
++	}
+ 
+ 	if err := delChain(ipt, "nat", "ts-postrouting"); err != nil {
+ 		errs = append(errs, err)
+diff --git a/util/linuxfw/iptables_runner.go b/util/linuxfw/iptables_runner.go
+index ad983fb..375a2e4 100644
+--- a/util/linuxfw/iptables_runner.go
++++ b/util/linuxfw/iptables_runner.go
+@@ -164,6 +164,9 @@ func (i *iptablesRunner) AddHooks() error {
+ 		if err := divert(ipt, "filter", "FORWARD"); err != nil {
+ 			return err
+ 		}
++		if err := divert(ipt, "mangle", "PREROUTING"); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	for _, ipt := range i.getNATTables() {
+@@ -198,6 +201,9 @@ func (i *iptablesRunner) AddChains() error {
+ 		if err := create(ipt, "filter", "ts-forward"); err != nil {
+ 			return err
+ 		}
++		if err := create(ipt, "mangle", "ts-prerouting"); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	for _, ipt := range i.getNATTables() {
+@@ -260,6 +266,15 @@ func (i *iptablesRunner) addBase4(tunname string) error {
+ 		return fmt.Errorf("adding %v in v4/filter/ts-forward: %w", args, err)
+ 	}
+ 
++	// Mark packets arriving on the tunnel in mangle/PREROUTING too. On
++	// Android the routing decision for forwarded traffic happens before
++	// filter/FORWARD, so the mark has to be applied earlier for the
++	// android-specific ip rules to send it out the default network.
++	args = []string{"-i", tunname, "-j", "MARK", "--set-mark", subnetRouteMark + "/" + fwmarkMask}
++	if err := i.ipt4.Append("mangle", "ts-prerouting", args...); err != nil {
++		return fmt.Errorf("adding %v in v4/mangle/ts-prerouting: %w", args, err)
++	}
++
+ 	return nil
+ }
+ 
+@@ -373,6 +388,12 @@ func (i *iptablesRunner) addBase6(tunname string) error {
+ 		return fmt.Errorf("adding %v in v6/filter/ts-forward: %w", args, err)
+ 	}
+ 
++	// See the corresponding IPv4 rule in addBase4.
++	args = []string{"-i", tunname, "-j", "MARK", "--set-mark", subnetRouteMark + "/" + fwmarkMask}
++	if err := i.ipt6.Append("mangle", "ts-prerouting", args...); err != nil {
++		return fmt.Errorf("adding %v in v6/mangle/ts-prerouting: %w", args, err)
++	}
++
+ 	return nil
+ }
+ 
+@@ -385,6 +406,9 @@ func (i *iptablesRunner) DelChains() error {
+ 		if err := delChain(ipt, "filter", "ts-forward"); err != nil {
+ 			return err
+ 		}
++		if err := delChain(ipt, "mangle", "ts-prerouting"); err != nil {
++			return err
++		}
+ 	}
+ 
+ 	for _, ipt := range i.getNATTables() {
+@@ -438,6 +462,9 @@ func (i *iptablesRunner) DelHooks(logf logger.Logf) error {
+ 		if err := delTSHook(ipt, "filter", "FORWARD", logf); err != nil {
+ 			return err
+ 		}
++		if err := delTSHook(ipt, "mangle", "PREROUTING", logf); err != nil {
++			return err
++		}
+ 	}
+ 	for _, ipt := range i.getNATTables() {
+ 		if err := delTSHook(ipt, "nat", "POSTROUTING", logf); err != nil {
+diff --git a/util/osuser/group_ids.go b/util/osuser/group_ids.go
+index 4d43f2d..2667d66 100644
+--- a/util/osuser/group_ids.go
++++ b/util/osuser/group_ids.go
+@@ -23,6 +23,16 @@ func GetGroupIds(user *user.User) ([]string, error) {
+ 		return nil, nil
+ 	}
+ 
++	if runtime.GOOS == "android" {
++		// Android has no getent and no /etc/group that os/user could
++		// read, so parse `id -Gz`; fall back to root's group so that
++		// taildrop/serve file ownership works.
++		if ids, err := getGroupIdsWithId(user.Username); err == nil && len(ids) > 0 {
++			return ids, nil
++		}
++		return []string{"0"}, nil
++	}
++
+ 	if runtime.GOOS != "linux" && runtime.GOOS != "freebsd" {
+ 		return user.GroupIds()
+ 	}
+diff --git a/util/osuser/user.go b/util/osuser/user.go
+index fccaae4..1e5ee66 100644
+--- a/util/osuser/user.go
++++ b/util/osuser/user.go
+@@ -51,6 +51,10 @@ func LookupByUsername(username string) (*user.User, error) {
+ 	return u, err
+ }
+ 
++// overrideLookupFunc, if set, replaces the default lookup logic on platforms
++// that need it (Android).
++var overrideLookupFunc func(string, bool) (*user.User, string, error)
++
+ // lookupStd is either user.Lookup or user.LookupId.
+ type lookupStd func(string) (*user.User, error)
+ 
+@@ -82,6 +86,11 @@ func lookup(usernameOrUID string, std lookupStd, wantShell bool) (*user.User, st
+ 		return u, shell, err
+ 	}
+ 
++	// Android-specific lookup (see user_android.go).
++	if runtime.GOOS == "android" && overrideLookupFunc != nil {
++		return overrideLookupFunc(usernameOrUID, wantShell)
++	}
++
+ 	// No getent on Gokrazy. So hard-code the login shell.
+ 	if distro.Get() == distro.Gokrazy {
+ 		var shell string
+diff --git a/util/osuser/user_android.go b/util/osuser/user_android.go
+new file mode 100644
+index 0000000..62edbe8
+--- /dev/null
++++ b/util/osuser/user_android.go
+@@ -0,0 +1,84 @@
++// Copyright (c) Tailscale Inc & contributors
++// SPDX-License-Identifier: BSD-3-Clause
++
++//go:build android
++
++package osuser
++
++import (
++	"context"
++	"os"
++	"os/exec"
++	"os/user"
++	"strings"
++	"time"
++)
++
++func init() {
++	overrideLookupFunc = androidLookup
++}
++
++// androidLookup implements user lookup for Android, which has no getent and
++// no /etc/passwd entry for app users, so everything is derived from `id`.
++func androidLookup(usernameOrUID string, wantShell bool) (*user.User, string, error) {
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++
++	var shell string
++	if wantShell {
++		if out, err := exec.LookPath("bash"); err == nil {
++			shell = out
++		} else if out, err := exec.LookPath("sh"); err == nil {
++			shell = out
++		} else {
++			shell = "/system/bin/sh"
++		}
++	}
++
++	uid := getAndroidCommandOutput(ctx, "id", "-u", usernameOrUID, "")
++	if uid == "" {
++		// Unknown user, fall back to root.
++		usernameOrUID = "root"
++		uid = getAndroidCommandOutput(ctx, "id", "-u", "0", "")
++	}
++
++	gid := getAndroidCommandOutput(ctx, "id", "-g", usernameOrUID, "0")
++	username := getAndroidCommandOutput(ctx, "id", "-un", usernameOrUID, usernameOrUID)
++	homeDir := getAndroidHomeDir("/")
++
++	return &user.User{
++		Uid:      uid,
++		Gid:      gid,
++		Username: username,
++		Name:     "Android",
++		HomeDir:  homeDir,
++	}, shell, nil
++}
++
++// getAndroidCommandOutput runs cmd and returns its trimmed output, or the last
++// element of args (the default) if the command fails.
++func getAndroidCommandOutput(ctx context.Context, cmd string, args ...string) string {
++	if len(args) == 0 {
++		return ""
++	}
++
++	defaultValue := args[len(args)-1]
++	cmdArgs := args[:len(args)-1]
++
++	out, err := exec.CommandContext(ctx, cmd, cmdArgs...).Output()
++	if err != nil {
++		return defaultValue
++	}
++
++	return strings.TrimSpace(string(out))
++}
++
++// getAndroidHomeDir returns the home directory, falling back to defaultDir.
++func getAndroidHomeDir(defaultDir string) string {
++	if home, err := os.UserHomeDir(); err == nil {
++		if home = strings.TrimSpace(home); home != "" {
++			return home
++		}
++	}
++	return defaultDir
++}
+diff --git a/wgengine/router/osrouter/router_linux.go b/wgengine/router/osrouter/router_linux.go
+index c8b31d0..347ec3c 100644
 --- a/wgengine/router/osrouter/router_linux.go
 +++ b/wgengine/router/osrouter/router_linux.go
 @@ -1,7 +1,7 @@
@@ -29,40 +1366,48 @@
  
  package osrouter
  
-@@ -17,6 +17,7 @@
+@@ -16,6 +16,7 @@
+ 	"os"
  	"os/exec"
  	"path/filepath"
- 	"slices"
 +	"runtime"
+ 	"slices"
  	"strconv"
  	"strings"
- 	"sync"
-@@ -588,7 +589,7 @@
+@@ -588,7 +589,9 @@ func (r *linuxRouter) Set(cfg *router.Config) error {
  
  	// Issue 11405: enable IP forwarding on gokrazy.
  	advertisingRoutes := len(cfg.SubnetRoutes) > 0
 -	if getDistroFunc() == distro.Gokrazy && advertisingRoutes {
++	// On Android, tailscaled runs as root from a Magisk/KernelSU module and
++	// has to enable forwarding itself; there is no init script doing it.
 +	if (getDistroFunc() == distro.Gokrazy || runtime.GOOS == "android") && advertisingRoutes {
  		r.enableIPForwarding()
  	}
  
-@@ -1651,6 +1652,8 @@
- func ipRules() []netlink.Rule {
- 	if getDistroFunc() == distro.UBNT {
- 		return ubntIPRules
-+	} else if runtime.GOOS == "android" {
-+		return getAndroidIPRules()
- 	}
- 	return baseIPRules
+@@ -1646,12 +1649,104 @@ func mustRouteTable(num int) RouteTable {
+ 	},
  }
-@@ -2021,3 +2024,55 @@
- 		IPNet: netipx.PrefixIPNet(p),
- 	}
- }
-+
-+// detectAndroidDefaultTable returns the routing table number for the current
-+// default route on Android. Returns 0 if detection fails.
+ 
++// detectAndroidDefaultTable returns the routing table number of the physical
++// network that currently holds the default route on Android. It returns 0 if
++// detection fails.
++//
++// Android's netd puts each network in its own routing table and selects it
++// with policy rules keyed on fwmark, so exit-node traffic leaving tailscale0
++// has to be looked up in the table of the underlying physical network. Note
++// that this is not necessarily the table of the "current" default route: a
++// connected VPN app (e.g. v2rayNG) owns the default network, and a plain
++// route lookup would return its tunnel's table and route exit-node traffic
++// into the VPN.
 +func detectAndroidDefaultTable() int {
++	if routeTable, _ := linuxfw.AndroidDefaultPhysicalNetwork(); routeTable > 0 {
++		return routeTable
++	}
++	// Fall back to a plain lookup of the current default route. With no
++	// other VPN connected this is the physical network's table; when a VPN
++	// app is connected it is the VPN's table, matching the behavior before
++	// physical-network detection existed.
 +	routes, err := netlink.RouteGet(net.IPv4(8, 8, 8, 8))
 +	if err != nil || len(routes) == 0 {
 +		return 0
@@ -73,103 +1418,75 @@
 +	return 0
 +}
 +
-+// getAndroidIPRules returns Android-specific IP rules, including a dynamic
-+// exit node rule that uses the current default network's routing table.
++// getAndroidIPRules returns the policy routing rules Tailscale uses on
++// Android. Android's netd owns the low priority rules (VPN rules live at
++// 13000), so Tailscale has to slot its own rules in around them and use
++// fwmark bits that do not collide with netd's.
++//
++// The priority is the value represented here added to r.ipPolicyPrefBase,
++// which is usually 5200.
 +func getAndroidIPRules() []netlink.Rule {
 +	rules := []netlink.Rule{
++		// Priority 12500: keep peer traffic (100.64.0.0/10) in the
++		// Tailscale table even when another VPN is active, before
++		// Android's VPN rules at 13000.
 +		{
-+			Priority: 7300,
++			Priority: 7300, // 5200 + 7300 = 12500
 +			Dst:      netipx.PrefixIPNet(netip.MustParsePrefix("100.64.0.0/10")),
 +			Table:    tailscaleRouteTable.Num,
 +		},
 +		{
-+			Priority: 7300,
++			Priority: 7300, // 5200 + 7300 = 12500
 +			Dst:      netipx.PrefixIPNet(netip.MustParsePrefix("fd7a:115c:a1e0::/48")),
 +			Table:    tailscaleRouteTable.Num,
 +		},
++
++		// Priority 13001: lookup the main table for reply traffic marked
++		// with the subnet route mark. Replies from the tailnet to hotspot
++		// clients need the downstream subnet route (e.g. 10.45.158.0/24
++		// dev wlan2) that the kernel keeps in the main table.
 +		{
-+			Priority: 7801,
++			Priority: 7801, // 5200 + 7801 = 13001
 +			Mark:     tsconst.LinuxSubnetRouteMarkNum,
 +			Mask:     tsconst.LinuxFwmarkMaskNum,
 +			Table:    mainRouteTable.Num,
 +		},
++
++		// Priority 13001: packets not marked with the bypass mark go to
++		// the Tailscale table. When a VPN is up, its rules at 13000 catch
++		// traffic first; otherwise Tailscale is the fallback.
 +		{
-+			Priority: 7801,
++			Priority: 7801, // 5200 + 7801 = 13001
 +			Invert:   true,
 +			Mark:     tsconst.LinuxBypassMarkNum,
 +			Mask:     tsconst.LinuxFwmarkMaskNum,
 +			Table:    tailscaleRouteTable.Num,
 +		},
 +	}
++
++	// Exit node / subnet router: route traffic arriving from the tailnet
++	// out through the current default network's table.
 +	if table := detectAndroidDefaultTable(); table > 0 {
 +		rules = append(rules, netlink.Rule{
-+			Priority: 7801,
++			Priority: 7801, // 5200 + 7801 = 13001
 +			Mark:     tsconst.LinuxSubnetRouteMarkNum,
 +			Mask:     tsconst.LinuxFwmarkMaskNum,
 +			Table:    table,
 +		})
 +	}
++
 +	return rules
 +}
-diff --git a/net/netmon/ruledeleted_android.go b/net/netmon/ruledeleted_android.go
-new file mode 100644
---- /dev/null
-+++ b/net/netmon/ruledeleted_android.go
-@@ -0,0 +1,8 @@
-+//go:build android
 +
-+package netmon
-+
-+type RuleDeleted struct {
-+	Table    uint8
-+	Priority uint32
-+}
---- a/tsconst/linuxfw.go
-+++ b/tsconst/linuxfw.go
-@@ -13,31 +13,31 @@
- // that sysadmins would use those. Kubernetes uses a few bits in the
- // second byte, so we steer clear of that too.
- //
--// Empirically, most of the documentation on packet marks on the
--// internet gives the impression that the marks are 16 bits
--// wide. Based on this, we theorize that the upper two bytes are
--// relatively unused in the wild, and so we consume bits 16:23 (the
--// third byte).
-+// Ref: https://www.kxxt.dev/blog/full-tailscale-on-android-and-remote-unlocking/
-+// AOSP's code for Fwmark allocation is
-+// https://android.googlesource.com/platform/system/netd/+/master/include/Fwmark.h
-+//
-+// The lower 0-20 bits are already allocated by Android.
-+// Bit 21-28 is currently unused.
-+// Tailscale uses bits 25-28 and also sets bit 17 (ProtectedFromVPN).
- //
- // The constants are in the iptables/iproute2 string format for
- // matching and setting the bits, so they can be directly embedded in
- // commands.
- const (
- 	// The mask for reading/writing the 'firewall mask' bits on a packet.
--	// See the comment on the const block on why we only use the third byte.
--	//
--	// We claim bits 16:23 entirely. For now we only use the lower four
--	// bits, leaving the higher 4 bits for future use.
--	LinuxFwmarkMask    = "0xff0000"
--	LinuxFwmarkMaskNum = 0xff0000
-+	// We claim bits 25:28 entirely.
-+	LinuxFwmarkMask    = "0x1e000000"
-+	LinuxFwmarkMaskNum = 0x1e000000
+ // ipRules returns the appropriate list of ip rules to be used by Tailscale. See
+ // comments on baseIPRules and ubntIPRules for more details.
+ func ipRules() []netlink.Rule {
+ 	if getDistroFunc() == distro.UBNT {
+ 		return ubntIPRules
+ 	}
++	if runtime.GOOS == "android" {
++		return getAndroidIPRules()
++	}
+ 	return baseIPRules
+ }
  
- 	// Packet is from Tailscale and to a subnet route destination, so
- 	// is allowed to be routed through this machine.
--	LinuxSubnetRouteMark    = "0x40000"
--	LinuxSubnetRouteMarkNum = 0x40000
-+	LinuxSubnetRouteMark    = "0x8000000"
-+	LinuxSubnetRouteMarkNum = 0x8000000
- 
- 	// Packet was originated by tailscaled itself, and must not be
- 	// routed over the Tailscale network.
--	LinuxBypassMark    = "0x80000"
--	LinuxBypassMarkNum = 0x80000
-+	// Includes bit 17 (0x20000) ProtectedFromVPN to bypass Android VPN routing.
-+	LinuxBypassMark    = "0x10020000"
-+	LinuxBypassMarkNum = 0x10020000
- )

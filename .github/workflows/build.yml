@@ -68,11 +68,7 @@ jobs:
 
         cd tailscale-build
 
-        sed -i '/func DefaultTailscaledSocket() string {/a\\tif runtime.GOOS == "android" {\n\t\treturn "/data/adb/tailscale/run/tailscaled.sock"\n\t}' paths/paths.go
-        sed -i 's|/etc/resolv.conf|/data/adb/tailscale/etc/resolv.conf|g' net/dns/resolvconfpath_default.go
-        sed -i 's|/etc/resolv.pre-tailscale-backup.conf|/data/adb/tailscale/etc/resolv.pre-tailscale-backup.conf|g' net/dns/resolvconfpath_default.go
-
-        patch -p1 < ../tailscale-android.patch
+        patch -p1 --no-backup-if-mismatch < ../tailscale-android.patch
 
 
         eval `CGO_ENABLED=0 GOOS=$(go env GOHOSTOS) GOARCH=$(go env GOHOSTARCH) go run ./cmd/mkversion`

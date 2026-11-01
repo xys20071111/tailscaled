@@ -19,6 +19,24 @@ After installation, the Tailscale daemon (`tailscaled`) will run automatically o
 
 - This module only support `arm64` architecture.
 
+## Using together with other VPN apps (v2rayNG, Clash, ...)
+
+tailscaled marks its own sockets (WireGuard, DERP, control plane) the same way
+`VpnService.protect` does, so another VPN app becoming the default network does
+not capture its traffic: tailscale stays connected and keeps direct peer
+connections while the other VPN runs.
+
+Check it is active with `tailscaled.service log`:
+
+- `netns: marking sockets with fwmark 0x...` — coexistence protection is on.
+- `netns: no validated Android SO_MARK available` — protection is off (tailscaled
+  behaves like a plain Linux daemon; a VPN app that captures all traffic will
+  also capture tailscale's). The `linuxfw/android: ...` lines next to it say
+  which detection stage failed; include them if you report an issue.
+
+Switching between Wi-Fi and cellular refreshes the mark within a few seconds;
+a short hiccup during the switch is normal.
+
 ## Available command
 
 - `tailscale`: This command  execute tailscale operation.
