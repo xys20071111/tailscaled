@@ -1,6 +1,6 @@
 {
-  "version": "v1.104.4",
-  "versionCode": "11044",
-  "zipUrl": "https://github.com/xys20071111/tailscaled/releases/download/v1.104.4/Magisk-Tailscaled-v1.104.4.zip",
+  "version": "v1.104.5",
+  "versionCode": "11045",
+  "zipUrl": "https://github.com/xys20071111/tailscaled/releases/download/v1.104.5/Magisk-Tailscaled-v1.104.5.zip",
   "changelog": "https://raw.githubusercontent.com/xys20071111/tailscaled/main/CHANGELOG.md"
 }
